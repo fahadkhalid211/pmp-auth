@@ -1,0 +1,18 @@
+/* PMP 2FA Auth – Admin */
+.pmp2fa-admin-header { display:flex; align-items:center; gap:14px; background:#1e1b4b; border-radius:12px; padding:20px 24px; margin-bottom:24px; }
+.pmp2fa-admin-icon { font-size:38px; }
+.pmp2fa-admin-header h1 { margin:0 0 4px; color:#f1f5f9; font-size:20px; }
+.pmp2fa-admin-header p { margin:0; color:#7c8db5; font-size:13px; }
+.pmp2fa-admin-layout { display:grid; grid-template-columns:1fr 260px; gap:20px; align-items:start; }
+@media(max-width:900px){ .pmp2fa-admin-layout { grid-template-columns:1fr; } }
+.pmp2fa-box { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:20px 22px; margin-bottom:18px; }
+.pmp2fa-box h3 { margin:0 0 16px; font-size:14px; font-weight:700; color:#111827; }
+.pmp2fa-row { margin-bottom:14px; }
+.pmp2fa-row label { display:block; font-size:13px; font-weight:600; color:#374151; margin-bottom:5px; }
+.pmp2fa-row input, .pmp2fa-row select { max-width:100%; }
+.pmp2fa-row-2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.pmp2fa-row-3 { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+@media(max-width:700px){ .pmp2fa-row-2,.pmp2fa-row-3 { grid-template-columns:1fr; } }
+.pmp2fa-test-row { display:flex; align-items:center; gap:10px; margin-top:8px; }
+.pmp2fa-result { font-size:13px; color:#059669; }
+.pmp2fa-result.err { color:#dc2626; }

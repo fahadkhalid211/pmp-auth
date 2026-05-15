@@ -1,0 +1,492 @@
+# PMP 2FA Authentication - Documentation
+
+**Version:** 3.0.0  
+**Author:** Fahad Khalid  
+**Compatible with:** WordPress 5.0+, PHP 7.0+, Paid Memberships Pro  
+
+---
+
+## Table of Contents
+
+1. [Introduction](#introduction)
+2. [Features](#features)
+3. [Installation](#installation)
+4. [Configuration](#configuration)
+5. [Usage](#usage)
+6. [Twilio Setup](#twilio-setup)
+7. [Customization](#customization)
+8. [Troubleshooting](#troubleshooting)
+9. [FAQ](#faq)
+10. [Support](#support)
+11. [Changelog](#changelog)
+
+---
+
+## Introduction
+
+PMP 2FA Authentication is a premium WordPress plugin that adds Two-Factor Authentication (2FA) to your Paid Memberships Pro site. After entering their password, users must verify their identity with a one-time password (OTP) sent via email or SMS before gaining access.
+
+This plugin works seamlessly with both the default WordPress login page (`wp-login.php`) and PMP's frontend login shortcode, providing a consistent security layer across your entire site.
+
+---
+
+## Features
+
+### Security Features
+- **Email OTP**: Secure HTML emails with branded design
+- **SMS OTP via Twilio**: Global SMS delivery to any phone number
+- **Dual Method Support**: Let users choose between email and SMS at login
+- **Trusted Device**: "Remember this device" option for seamless logins
+- **Brute-Force Protection**: Maximum 5 incorrect attempts per OTP
+- **Rate Limiting**: Configurable max OTP requests per hour per user
+- **Secure OTP Storage**: Hashed with `wp_hash()`, never stored in plain text
+- **Expiring Codes**: Time-limited OTPs (configurable 1-60 minutes)
+
+### User Experience
+- **Modern Minimal UI**: Elegant modal popup with smooth animations
+- **Mobile Responsive**: Perfect display on all devices
+- **Accessibility Ready**: WCAG compliant with keyboard navigation
+- **Auto-Detection**: Pastes OTP from SMS automatically
+- **Real-time Feedback**: Instant success/error notifications
+- **Countdown Timer**: Visual indicator for code resend availability
+
+### Admin Features
+- **Easy Configuration**: Intuitive settings panel
+- **Test Functionality**: Send test email/SMS directly from admin
+- **User Management**: Revoke trusted devices per user
+- **Flexible Settings**: Customize OTP length, expiry, and more
+
+---
+
+## Installation
+
+### Automatic Installation (Recommended)
+
+1. Log in to your WordPress admin dashboard
+2. Navigate to **Plugins → Add New**
+3. Click **Upload Plugin** at the top
+4. Choose the `pmp-2fa-authentication.zip` file
+5. Click **Install Now**
+6. After installation, click **Activate**
+
+### Manual Installation
+
+1. Download the `pmp-2fa-authentication.zip` file
+2. Extract the ZIP file on your computer
+3. Upload the `pmp-2fa-authentication` folder to `/wp-content/plugins/`
+4. Log in to WordPress admin
+5. Go to **Plugins → Installed Plugins**
+6. Find "PMP 2FA Authentication" and click **Activate**
+
+### Post-Installation
+
+After activation:
+1. Go to **Settings → PMP 2FA Auth**
+2. Configure your preferred 2FA method
+3. Save settings — 2FA is now active!
+
+---
+
+## Configuration
+
+### General Settings
+
+Navigate to **Settings → PMP 2FA Auth** to access the configuration panel.
+
+#### 2FA Method
+Choose how users receive their verification codes:
+- **Email OTP only**: Codes sent via email (no additional setup required)
+- **SMS only (Twilio)**: Codes sent via SMS (requires Twilio account)
+- **Both (user chooses)**: Users can select their preferred method at login
+
+#### OTP Length (digits)
+Set the number of digits in the verification code (4-8 digits).
+- **Default**: 6 digits
+- **Recommendation**: 6 digits provides good security/usability balance
+
+#### OTP Expiry (minutes)
+How long before the code expires (1-60 minutes).
+- **Default**: 10 minutes
+- **Recommendation**: 5-10 minutes for optimal security
+
+#### Max OTP requests / hour
+Limit how many times a user can request a new code per hour.
+- **Default**: 5 requests/hour
+- **Purpose**: Prevents abuse and reduces costs (for SMS)
+
+#### Trust Device
+Allow users to skip 2FA on trusted devices for a set period.
+- **Enable**: Check the box to enable
+- **Trust duration**: Set days (1-365)
+- **Default**: 30 days
+
+### Email Settings
+
+Configure how OTP emails are sent:
+
+- **Email Subject**: Subject line for OTP emails
+  - Default: "Your Login Verification Code"
+  
+- **From Name**: Sender name displayed in emails
+  - Default: Your site name
+  
+- **From Email**: Sender email address
+  - Default: Your admin email
+
+**Test Email Button**: Click to send a test email to verify configuration.
+
+### SMS Settings (Twilio)
+
+Required for SMS OTP functionality:
+
+- **Account SID**: Your Twilio Account SID (starts with AC)
+- **Auth Token**: Your Twilio Auth Token
+- **From Number**: Your Twilio phone number in E.164 format (e.g., +12223334444)
+
+**Test SMS Button**: Click to send a test SMS to verify configuration.
+
+---
+
+## Usage
+
+### For Site Administrators
+
+1. **Activate the Plugin**: Follow installation steps above
+2. **Configure Settings**: Set up your preferred 2FA method
+3. **Test Functionality**: Use test buttons to verify email/SMS delivery
+4. **Monitor Usage**: Check user feedback and adjust settings as needed
+
+### For End Users
+
+#### First Login with 2FA Enabled
+
+1. Enter username and password as usual
+2. After successful password entry, a modal popup appears
+3. Check your email or SMS for the verification code
+4. Enter the 6-digit code in the input field
+5. (Optional) Check "Trust this device" to skip 2FA on this device
+6. Click "Verify Code"
+7. Upon successful verification, you're redirected to your dashboard
+
+#### Using Trusted Devices
+
+If you checked "Trust this device":
+- You won't be prompted for 2FA on that device/browser
+- Trust lasts for the configured duration (default: 30 days)
+- Clear browser cookies to reset trust
+
+#### Switching Between Email and SMS
+
+If admin enabled "Both" method:
+- Click the **Email** or **SMS** tab in the modal
+- Code will be sent to your selected method
+- You can switch methods anytime during login
+
+#### Resending Codes
+
+If you didn't receive the code:
+1. Wait for the countdown timer (30 seconds)
+2. Click "Resend Code"
+3. A new code will be sent to your selected method
+
+---
+
+## Twilio Setup
+
+### Step 1: Create a Twilio Account
+
+1. Visit [https://www.twilio.com](https://www.twilio.com)
+2. Click **Sign Up** and create an account
+3. Verify your email and phone number
+4. Complete the account setup wizard
+
+### Step 2: Get Your Credentials
+
+1. Log in to your Twilio Console
+2. Navigate to **Dashboard** (or **Account → Settings**)
+3. Find your **Account SID** (starts with AC...)
+4. Find your **Auth Token** (click "Show" to reveal)
+5. Copy both values
+
+### Step 3: Purchase a Phone Number
+
+1. Go to **Phone Numbers → Buy a Number**
+2. Search for available numbers in your country
+3. Choose a number with **SMS capability**
+4. Complete the purchase
+5. Copy the phone number in E.164 format (e.g., +12223334444)
+
+### Step 4: Configure in WordPress
+
+1. Go to **Settings → PMP 2FA Auth**
+2. Scroll to **SMS Settings (Twilio)**
+3. Paste your:
+   - Account SID
+   - Auth Token
+   - From Number
+4. Click **Save Settings**
+5. Click **Send Test SMS** to verify
+
+### Twilio Pricing
+
+- **Pay-as-you-go**: No monthly fees
+- **SMS costs**: Vary by country (typically $0.0075-$0.05 per message)
+- **Phone number**: ~$1/month (varies by country)
+- **Free trial**: $15 credit when you sign up
+
+[View Twilio Pricing](https://www.twilio.com/pricing)
+
+---
+
+## Customization
+
+### Styling the Modal
+
+The plugin uses modern CSS with minimal specificity. To customize:
+
+```css
+/* Add to your theme's style.css or custom CSS */
+
+/* Change primary button color */
+.pmp2fa-btn-primary {
+    background: linear-gradient(135deg, #your-color-1, #your-color-2) !important;
+}
+
+/* Change modal border radius */
+.pmp2fa-modal {
+    border-radius: 20px !important;
+}
+
+/* Change icon background */
+.pmp2fa-modal__icon {
+    background: linear-gradient(135deg, #your-color, #your-color-2);
+}
+```
+
+### Changing Logo
+
+The plugin automatically uses your site's logo if set in your theme. To force a specific logo:
+
+```php
+// Add to your theme's functions.php
+add_filter('pmp2fa_logo_url', 'custom_pmp2fa_logo');
+function custom_pmp2fa_logo($url) {
+    return get_stylesheet_directory_uri() . '/images/my-logo.png';
+}
+```
+
+### Translations
+
+The plugin is translation-ready. To translate:
+
+1. Download a tool like [Poedit](https://poedit.net/)
+2. Open `/languages/pmp-2fa-authentication.pot`
+3. Translate strings to your language
+4. Save as `pmp-2fa-authentication-{locale}.po` (e.g., `pmp-2fa-authentication-es_ES.po`)
+5. Generate the `.mo` file
+6. Upload both files to `/languages/` folder
+
+---
+
+## Troubleshooting
+
+### Users Not Receiving Email OTP
+
+**Check:**
+1. Go to **Settings → PMP 2FA Auth**
+2. Click **Send Test Email**
+3. Check spam/junk folder
+4. Verify your site can send emails (use WP Mail SMTP plugin if needed)
+
+**Solution:**
+- Install an SMTP plugin (e.g., WP Mail SMTP, Post SMTP)
+- Configure with your email provider (Gmail, SendGrid, etc.)
+- Test again
+
+### Users Not Receiving SMS OTP
+
+**Check:**
+1. Verify Twilio credentials are correct
+2. Ensure Twilio phone number has SMS capability
+3. Check Twilio dashboard for error logs
+4. Verify user has phone number in profile
+
+**Solution:**
+1. Go to Twilio Console → Phone Numbers
+2. Confirm SMS is enabled for your number
+3. Check Account SID and Auth Token are copied correctly
+4. Ensure phone number is in E.164 format (+country code)
+
+### "Invalid Code" Error
+
+**Possible Causes:**
+- Code expired (check expiry time setting)
+- User entered wrong code
+- Code already used
+
+**Solution:**
+- Ask user to request a new code
+- Increase OTP expiry time in settings
+- Check if rate limiting is too restrictive
+
+### Modal Not Appearing
+
+**Check:**
+1. Is Paid Memberships Pro installed and active?
+2. Are there JavaScript errors in browser console?
+3. Is your theme compatible?
+
+**Solution:**
+1. Open browser console (F12) and check for errors
+2. Temporarily disable other plugins to test for conflicts
+3. Switch to default WordPress theme (Twenty Twenty-Four) to test
+
+### Trusted Device Not Working
+
+**Check:**
+1. Is "Trust Device" option enabled in settings?
+2. Did user check the checkbox during login?
+3. Are cookies enabled in browser?
+
+**Solution:**
+- Clear browser cache and cookies
+- Test in incognito mode
+- Verify trust duration is set appropriately
+
+---
+
+## FAQ
+
+### Does this work with PMP frontend login shortcode?
+
+**Yes!** The plugin intercepts authentication at the WordPress core level and works with all login methods including PMP's `[pmpro_login]` shortcode.
+
+### Is the Twilio API key stored securely?
+
+**Yes.** Keys are stored in the WordPress options table using standard WordPress sanitization functions. They are never exposed in frontend code.
+
+### What happens if a user doesn't have a phone number saved?
+
+If SMS is selected but no phone number is found on the user's profile, the plugin falls back to Email OTP automatically.
+
+### How do I revoke trusted devices?
+
+**For yourself:**
+1. Go to **Settings → PMP 2FA Auth**
+2. In the sidebar, click **Revoke My Devices**
+
+**For another user:**
+1. Go to **Settings → PMP 2FA Auth**
+2. In the sidebar, enter username/email/user ID
+3. Click **Revoke**
+
+### Can users disable 2FA for themselves?
+
+No. 2FA is enforced site-wide by the administrator. If you want to allow users to toggle 2FA, contact us for custom development.
+
+### Does this work with other membership plugins?
+
+This plugin is specifically designed for Paid Memberships Pro. While it may work with other plugins, compatibility is not guaranteed.
+
+### Is there a free version available?
+
+No, this is a premium plugin sold exclusively on CodeCanyon. However, we offer a 30-day money-back guarantee if you're not satisfied.
+
+### Can I use this on multiple sites?
+
+- **Regular License**: Single end product (one website)
+- **Extended License**: Multiple end products (unlimited websites for clients)
+
+Purchase the appropriate license for your needs.
+
+---
+
+## Support
+
+### Getting Help
+
+We provide dedicated support for our customers:
+
+1. **CodeCanyon Comments**: Post questions in the item comments
+2. **Email Support**: support@yourdomain.com (response within 24-48 hours)
+3. **Documentation**: This comprehensive guide covers most scenarios
+
+### Before Contacting Support
+
+Please check:
+1. ✅ This documentation thoroughly
+2. ✅ WordPress and PHP meet minimum requirements
+3. ✅ Paid Memberships Pro is installed and active
+4. ✅ Twilio credentials are correct (if using SMS)
+5. ✅ No JavaScript errors in browser console
+
+### What to Include in Support Request
+
+To help us assist you faster, include:
+- WordPress version
+- PHP version
+- Plugin version
+- Active theme name
+- List of active plugins
+- Screenshot of the issue
+- Any error messages
+- Steps to reproduce the issue
+
+---
+
+## Changelog
+
+### Version 3.0.0
+- ✨ **New**: Modern minimal UI redesign with elegant animations
+- ✨ **New**: SVG icons throughout the interface
+- ✨ **New**: Improved mobile responsiveness
+- ✨ **New**: Enhanced accessibility (WCAG 2.1 compliant)
+- 🎨 **Improved**: Smoother transitions and micro-interactions
+- 🎨 **Improved**: Better focus states for keyboard navigation
+- 🔧 **Fixed**: Minor CSS compatibility issues with some themes
+- 🔧 **Fixed**: Countdown timer display on mobile devices
+
+### Version 2.0.0
+- Complete rewrite for reliability
+- Fixed compatibility with PMP frontend login shortcode
+- OTP now sent after WordPress fully boots to ensure wp_mail reliability
+- Switched to transient + cookie state management (no PHP sessions)
+- Full standalone 2FA page rendered via template_redirect
+
+### Version 1.0.0
+- Initial release
+- Email OTP support
+- SMS OTP via Twilio
+- Basic admin settings panel
+
+---
+
+## Credits
+
+- **Author**: Fahad Khalid
+- **Plugin URI**: https://codecanyon.net/user/fahadkhalid/portfolio
+- **Author URI**: https://linktr.ee/fahadkhalid211
+
+---
+
+## License
+
+This plugin is sold exclusively on CodeCanyon under Envato's licensing terms:
+
+- **Regular License**: For single end product (one website)
+- **Extended License**: For multiple end products (client work)
+
+**Important**: 
+- Resale, redistribution, or sublicensing is strictly prohibited
+- You cannot offer this plugin as part of a SaaS service without Extended License
+- Source code modifications allowed only for your licensed usage
+
+For full license terms, visit: https://codecanyon.net/licenses/terms/regular
+
+---
+
+**Thank you for purchasing PMP 2FA Authentication!**
+
+If you enjoy this plugin, please consider leaving a review on CodeCanyon. Your feedback helps us improve and reach more users.
+
+⭐⭐⭐⭐⭐ [Leave a Review](https://codecanyon.net/downloads)
