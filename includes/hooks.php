@@ -1,31 +1,46 @@
 <?php
 /**
- * Core Hooks - v4
+ * Core plugin hooks.
  *
- * Key insight: PMP's login form, on WP_Error, reloads the same login page
- * with the error code as ?action=pmp2fa_pending in the URL. It does NOT
- * redirect elsewhere. So we just detect that action on template_redirect
- * and replace the page output with the 2FA form.
+ * Authentication flow overview
+ * ────────────────────────────
+ * 1. User submits credentials on PMP login form or wp-login.php.
+ * 2. pmp2fa_authenticate_filter() intercepts a valid WP_User, stores a
+ *    pending-login transient + cookie, and returns WP_Error( 'pmp2fa_pending' ).
+ * 3. PMP reloads the login page with ?action=pmp2fa_pending in the URL.
+ * 4. pmp2fa_maybe_show_2fa_page() detects that action, sends the OTP, and
+ *    injects the 2FA modal overlay into wp_footer.
+ * 5. The user enters their OTP; pmp2fa_ajax_verify_otp() validates it and,
+ *    on success, calls wp_set_auth_cookie() to complete the login.
  *
  * @package PMP_2FA_Authentication
+ * @since   2.0.0
  */
 
-if ( ! defined( 'ABSPATH' ) ) exit;
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
 
+/**
+ * Register all plugin hooks and AJAX handlers.
+ *
+ * @return void
+ */
 function pmp2fa_register_hooks() {
-	// Block login and set pending state.
+	// Core authentication intercept.
 	add_filter( 'authenticate', 'pmp2fa_authenticate_filter', 100, 3 );
 
-	// Detect the reload with ?action=pmp2fa_pending and show 2FA form.
+	// Show the 2FA modal when PMP reloads with ?action=pmp2fa_pending.
 	add_action( 'template_redirect', 'pmp2fa_maybe_show_2fa_page', 1 );
 
-	// AJAX endpoints.
+	// AJAX: unauthenticated actions (user is not yet logged in).
 	add_action( 'wp_ajax_nopriv_pmp2fa_send_otp',   'pmp2fa_ajax_send_otp' );
 	add_action( 'wp_ajax_nopriv_pmp2fa_resend_otp', 'pmp2fa_ajax_send_otp' );
 	add_action( 'wp_ajax_nopriv_pmp2fa_verify_otp', 'pmp2fa_ajax_verify_otp' );
-	add_action( 'wp_ajax_pmp2fa_verify_otp',        'pmp2fa_ajax_verify_otp' );
+	// Authenticated verify endpoint (edge-case: already-logged-in session).
+	add_action( 'wp_ajax_pmp2fa_verify_otp', 'pmp2fa_ajax_verify_otp' );
 
-	// Profile phone field and trusted devices section.
+	// User profile: phone field + trusted devices.
 	add_action( 'show_user_profile',        'pmp2fa_phone_field' );
 	add_action( 'edit_user_profile',        'pmp2fa_phone_field' );
 	add_action( 'personal_options_update',  'pmp2fa_save_phone' );
@@ -34,117 +49,138 @@ function pmp2fa_register_hooks() {
 	add_action( 'edit_user_profile',        'pmp2fa_profile_trusted_devices' );
 	add_action( 'wp_ajax_pmp2fa_revoke_own_devices', 'pmp2fa_ajax_revoke_own_devices' );
 
-	// Logout cleanup.
+	// Cleanup on logout.
 	add_action( 'wp_logout', 'pmp2fa_on_logout' );
-
-	// Debug endpoint.
-	add_action( 'wp_ajax_nopriv_pmp2fa_debug', 'pmp2fa_ajax_debug' );
-	add_action( 'wp_ajax_pmp2fa_debug',        'pmp2fa_ajax_debug' );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // 1. AUTHENTICATE FILTER
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Intercept a successful login and put it into 2FA pending state.
+ *
+ * Returns a WP_Error with code 'pmp2fa_pending' so PMP reloads the login page
+ * with ?action=pmp2fa_pending — which we then capture in template_redirect.
+ *
+ * @param WP_User|WP_Error|null $user     Resolved user or existing error.
+ * @param string                $username Username provided.
+ * @param string                $password Password provided.
+ * @return WP_User|WP_Error
+ */
 function pmp2fa_authenticate_filter( $user, $username, $password ) {
-	if ( is_wp_error( $user ) )           return $user;
-	if ( ! ( $user instanceof WP_User ) ) return $user;
-	if ( defined( 'PMP2FA_PASS' ) )       return $user;
+	// Pass through any existing errors or non-user values.
+	if ( is_wp_error( $user ) || ! ( $user instanceof WP_User ) ) {
+		return $user;
+	}
 
-	if ( pmp2fa_is_device_trusted( $user->ID ) ) return $user;
+	// Skip if 2FA already passed this request (e.g. after OTP verification).
+	if ( defined( 'PMP2FA_PASS' ) ) {
+		return $user;
+	}
 
-	// Store pending state.
+	// Skip if this device is already trusted.
+	if ( pmp2fa_is_device_trusted( $user->ID ) ) {
+		return $user;
+	}
+
+	// Store pending state and set initial method.
 	pmp2fa_set_pending( $user->ID );
 	$s      = pmp2fa_get_settings();
-	$method = ( $s['method'] === 'both' ) ? 'email' : $s['method'];
+	$method = ( 'both' === $s['method'] ) ? 'email' : $s['method'];
 	pmp2fa_set_method( $method );
 
-	// Store method so template_redirect can send OTP after WP fully loads.
-	// We do NOT send OTP here because wp_mail can fail when called inside
-	// the authenticate filter (too early in the boot process on some hosts).
-	// The OTP is sent in pmp2fa_maybe_show_2fa_page() instead.
+	// We intentionally do NOT send the OTP here. wp_mail() can fail when called
+	// inside the authenticate filter (too early in the boot cycle on some hosts).
+	// The OTP is sent in pmp2fa_maybe_show_2fa_page() after WP has fully loaded.
 
-	// Return WP_Error with code 'pmp2fa_pending'.
-	// PMP will reload /login/?action=pmp2fa_pending&username=...
-	// We intercept that in template_redirect below.
 	return new WP_Error( 'pmp2fa_pending', '' );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 2. DETECT PMP RELOAD AND SHOW 2FA FORM
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. SHOW THE 2FA PAGE
+// ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Detect the PMP login reload and inject the 2FA modal into wp_footer.
+ *
+ * @return void
+ */
 function pmp2fa_maybe_show_2fa_page() {
-	// PMP reloads the login page with ?action=pmp2fa_pending after our error.
-	$action = isset( $_GET['action'] ) ? sanitize_key( $_GET['action'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+	// phpcs:disable WordPress.Security.NonceVerification.Recommended
+	$action = isset( $_GET['action'] ) ? sanitize_key( $_GET['action'] ) : '';
+	$manual = ! empty( $_GET['pmp2fa'] );
+	// phpcs:enable
 
-	// Also support our own ?pmp2fa=1 param as fallback.
-	$manual = ! empty( $_GET['pmp2fa'] ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-
-	if ( $action !== 'pmp2fa_pending' && ! $manual ) return;
-
-	// Must have a valid pending state.
-	$user_id = pmp2fa_get_pending();
-	if ( ! $user_id ) {
-		// No pending state — just let the login page render normally.
+	if ( 'pmp2fa_pending' !== $action && ! $manual ) {
 		return;
 	}
 
-	// Send OTP now — we are fully booted so wp_mail works reliably here.
-	// Only send if OTP not already stored (avoid re-sending on page refresh).
-	$otp_exists = ( false !== get_transient( 'pmp2fa_otp_' . $user_id ) );
-	if ( ! $otp_exists ) {
-		$method = pmp2fa_get_method();
-		$result = pmp2fa_dispatch_otp( $user_id, $method );
-		if ( is_wp_error( $result ) ) {
-			// OTP send failed — continue to render the page; user will see Resend option.
-		}
+	$user_id = pmp2fa_get_pending();
+	if ( ! $user_id ) {
+		return;
 	}
 
-	// Hook into wp_footer to inject the modal overlay HTML + assets into the
-	// existing page (which keeps the site's header, footer, and branding).
-	add_action( 'wp_footer', function() use ( $user_id ) {
-		pmp2fa_render_2fa_modal( $user_id );
-	}, 100 );
+	// Send OTP now — WP is fully booted so wp_mail() works reliably.
+	// Guard against re-sending on a plain page refresh.
+	if ( false === get_transient( 'pmp2fa_otp_' . $user_id ) ) {
+		pmp2fa_dispatch_otp( $user_id, pmp2fa_get_method() );
+	}
 
-	// Also enqueue assets via wp_enqueue_scripts so they load in <head>/<footer>
-	// properly. The inline fallback inside the modal handles cases where this
-	// hook fires too late.
-	add_action( 'wp_enqueue_scripts', function() {
-		wp_enqueue_style(
-			'pmp2fa-overlay',
-			PMP2FA_PLUGIN_URL . 'public/css/overlay.css',
-			array(),
-			PMP2FA_VERSION
-		);
-		wp_enqueue_script(
-			'pmp2fa-overlay',
-			PMP2FA_PLUGIN_URL . 'public/js/overlay.js',
-			array(),
-			PMP2FA_VERSION,
-			true
-		);
-	} );
+	// Enqueue assets properly so they land in <head> / before </body>.
+	add_action(
+		'wp_enqueue_scripts',
+		static function () {
+			wp_enqueue_style(
+				'pmp2fa-overlay',
+				PMP2FA_PLUGIN_URL . 'public/css/overlay.css',
+				array(),
+				PMP2FA_VERSION
+			);
+			wp_enqueue_script(
+				'pmp2fa-overlay',
+				PMP2FA_PLUGIN_URL . 'public/js/overlay.js',
+				array(),
+				PMP2FA_VERSION,
+				true
+			);
+		}
+	);
+
+	// Inject modal HTML at the very end of the page.
+	add_action(
+		'wp_footer',
+		static function () use ( $user_id ) {
+			pmp2fa_render_2fa_modal( $user_id );
+		},
+		100
+	);
 }
 
+/**
+ * Render the 2FA modal overlay template.
+ *
+ * @param int $user_id WordPress user ID.
+ * @return void
+ */
 function pmp2fa_render_2fa_modal( $user_id ) {
 	$user         = get_userdata( $user_id );
 	$settings     = pmp2fa_get_settings();
 	$method       = pmp2fa_get_method();
-	// Only show SMS tab if Twilio credentials are configured.
-	$show_both    = ( $settings['method'] === 'both' ) && pmp2fa_sms_configured();
+	$show_both    = ( 'both' === $settings['method'] ) && pmp2fa_sms_configured();
 	$has_phone    = (bool) get_user_meta( $user_id, 'pmp2fa_phone', true );
 	$remember_opt = ! empty( $settings['remember_device'] );
 	$expiry       = (int) $settings['otp_expiry'];
-	$masked       = ( $method === 'sms' && $has_phone )
-		? pmp2fa_mask_phone( get_user_meta( $user_id, 'pmp2fa_phone', true ) )
-		: pmp2fa_mask_email( $user->user_email );
 	$otp_length   = (int) $settings['otp_length'];
 	$nonce        = wp_create_nonce( 'pmp2fa_nonce' );
 	$cancel_url   = esc_url( pmp2fa_login_url() );
 	$ajax_url     = admin_url( 'admin-ajax.php' );
 	$site_name    = get_bloginfo( 'name' );
 	$site_url     = home_url( '/' );
+
+	$masked = ( 'sms' === $method && $has_phone )
+		? pmp2fa_mask_phone( get_user_meta( $user_id, 'pmp2fa_phone', true ) )
+		: pmp2fa_mask_email( $user->user_email );
 
 	// Logo.
 	$logo_url = '';
@@ -153,36 +189,54 @@ function pmp2fa_render_2fa_modal( $user_id ) {
 		$logo_url = $logo_id ? wp_get_attachment_image_url( $logo_id, 'medium' ) : '';
 	}
 
-	// Inline CSS and JS as fallback in case enqueue hooks fired too late.
+	// Inline CSS/JS fallback — used when enqueue hooks fired too late.
 	$css = file_exists( PMP2FA_PLUGIN_DIR . 'public/css/overlay.css' )
-		? file_get_contents( PMP2FA_PLUGIN_DIR . 'public/css/overlay.css' ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		? file_get_contents( PMP2FA_PLUGIN_DIR . 'public/css/overlay.css' ) // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		: '';
 	$js  = file_exists( PMP2FA_PLUGIN_DIR . 'public/js/overlay.js' )
-		? file_get_contents( PMP2FA_PLUGIN_DIR . 'public/js/overlay.js' ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		? file_get_contents( PMP2FA_PLUGIN_DIR . 'public/js/overlay.js' ) // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		: '';
 
 	include PMP2FA_PLUGIN_DIR . 'templates/2fa-page-full.php';
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // 3. AJAX: Send / Resend OTP
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * AJAX handler: send (or resend) an OTP to the pending user.
+ *
+ * @return void
+ */
 function pmp2fa_ajax_send_otp() {
 	if ( ! check_ajax_referer( 'pmp2fa_nonce', 'nonce', false ) ) {
-		wp_send_json_error( array( 'message' => __( 'Security check failed. Please refresh and try again.', 'pmp-2fa-authentication' ) ) );
+		wp_send_json_error(
+			array( 'message' => __( 'Security check failed. Please refresh and try again.', 'pmp-2fa-authentication' ) ),
+			403
+		);
 	}
 
 	$user_id = pmp2fa_get_pending();
 	if ( ! $user_id ) {
-		wp_send_json_error( array( 'message' => __( 'Session expired. Please log in again.', 'pmp-2fa-authentication' ) ) );
+		wp_send_json_error(
+			array( 'message' => __( 'Session expired. Please log in again.', 'pmp-2fa-authentication' ) ),
+			401
+		);
 	}
 
 	$s = pmp2fa_get_settings();
 	if ( ! pmp2fa_rate_limit_ok( $user_id, (int) $s['rate_limit'] ) ) {
-		wp_send_json_error( array( 'message' => __( 'Too many requests. Please wait before requesting another code.', 'pmp-2fa-authentication' ) ) );
+		wp_send_json_error(
+			array( 'message' => __( 'Too many requests. Please wait before requesting another code.', 'pmp-2fa-authentication' ) ),
+			429
+		);
 	}
 
 	$method = isset( $_POST['method'] ) ? sanitize_key( wp_unslash( $_POST['method'] ) ) : pmp2fa_get_method();
-	if ( ! in_array( $method, array( 'email', 'sms' ), true ) ) $method = 'email';
+	if ( ! in_array( $method, array( 'email', 'sms' ), true ) ) {
+		$method = 'email';
+	}
 	pmp2fa_set_method( $method );
 
 	$result = pmp2fa_dispatch_otp( $user_id, $method );
@@ -191,39 +245,48 @@ function pmp2fa_ajax_send_otp() {
 	}
 
 	$user   = get_userdata( $user_id );
-	$masked = ( $method === 'sms' )
-		? pmp2fa_mask_phone( get_user_meta( $user_id, 'pmp2fa_phone', true ) )
+	$masked = ( 'sms' === $method )
+		? pmp2fa_mask_phone( (string) get_user_meta( $user_id, 'pmp2fa_phone', true ) )
 		: pmp2fa_mask_email( $user->user_email );
 
-	wp_send_json_success( array(
-		// translators: %s: masked email address or phone number
-		'message' => sprintf( __( 'Code sent to %s', 'pmp-2fa-authentication' ), '<strong>' . esc_html( $masked ) . '</strong>' ),
-	) );
+	wp_send_json_success(
+		array(
+			'message' => sprintf(
+				/* translators: %s: masked email address or phone number */
+				__( 'Code sent to %s', 'pmp-2fa-authentication' ),
+				'<strong>' . esc_html( $masked ) . '</strong>'
+			),
+		)
+	);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // 4. AJAX: Verify OTP
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * AJAX handler: verify the submitted OTP and complete the login on success.
+ *
+ * @return void
+ */
 function pmp2fa_ajax_verify_otp() {
 	if ( ! check_ajax_referer( 'pmp2fa_nonce', 'nonce', false ) ) {
-		wp_send_json_error( array(
-			'message' => __( 'Security check failed. Please refresh the page and try again.', 'pmp-2fa-authentication' ),
-			'debug'   => 'nonce_fail',
-		) );
+		wp_send_json_error(
+			array( 'message' => __( 'Security check failed. Please refresh the page and try again.', 'pmp-2fa-authentication' ) ),
+			403
+		);
 	}
 
 	$user_id = pmp2fa_get_pending();
 	if ( ! $user_id ) {
-		wp_send_json_error( array(
-			'message' => __( 'Session expired. Please go back and log in again.', 'pmp-2fa-authentication' ),
-			'debug'   => 'no_pending_user',
-			'cookie'  => isset( $_COOKIE['pmp2fa_token'] ) ? 'present' : 'missing',
-		) );
+		wp_send_json_error(
+			array( 'message' => __( 'Session expired. Please go back and log in again.', 'pmp-2fa-authentication' ) ),
+			401
+		);
 	}
 
 	$otp = isset( $_POST['otp'] ) ? sanitize_text_field( wp_unslash( $_POST['otp'] ) ) : '';
-	if ( $otp === '' ) {
+	if ( '' === $otp ) {
 		wp_send_json_error( array( 'message' => __( 'Please enter the verification code.', 'pmp-2fa-authentication' ) ) );
 	}
 
@@ -232,81 +295,142 @@ function pmp2fa_ajax_verify_otp() {
 		wp_send_json_error( array( 'message' => $result->get_error_message() ) );
 	}
 
-	// OTP correct — complete the login.
+	// ── OTP correct: complete the login ──────────────────────────────────────
 	pmp2fa_clear_pending();
-	if ( ! defined( 'PMP2FA_PASS' ) ) define( 'PMP2FA_PASS', true );
 
-	$remember = ! empty( $_POST['remember_device'] );
-	wp_set_auth_cookie( $user_id, $remember, is_ssl() );
+	if ( ! defined( 'PMP2FA_PASS' ) ) {
+		define( 'PMP2FA_PASS', true );
+	}
+
+	$remember_device = ! empty( $_POST['remember_device'] );
+	wp_set_auth_cookie( $user_id, $remember_device, is_ssl() );
 	wp_set_current_user( $user_id );
 
-	if ( $remember ) {
+	if ( $remember_device ) {
 		$s = pmp2fa_get_settings();
 		pmp2fa_trust_device( $user_id, (int) $s['remember_days'] );
 	}
 
 	$user = get_userdata( $user_id );
-	do_action( 'wp_login', $user->user_login, $user ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound
+	// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound
+	do_action( 'wp_login', $user->user_login, $user );
 
-	// Redirect to membership account page.
-	$redirect    = '';
+	// Determine post-login redirect (PMP account page preferred).
+	$redirect = '';
+
 	$acc_page_id = get_option( 'pmpro_account_page_id' );
 	if ( $acc_page_id ) {
 		$redirect = get_permalink( $acc_page_id );
 	}
+
 	if ( empty( $redirect ) && function_exists( 'pmpro_url' ) ) {
 		$redirect = pmpro_url( 'account' );
 	}
+
 	if ( empty( $redirect ) ) {
 		$page     = get_page_by_path( 'membership-account' );
 		$redirect = $page ? get_permalink( $page->ID ) : home_url( '/membership-account/' );
 	}
 
+	/**
+	 * Filter the URL users are redirected to after passing 2FA.
+	 *
+	 * @param string  $redirect Redirect URL.
+	 * @param WP_User $user     Logged-in user object.
+	 */
 	$redirect = apply_filters( 'pmp2fa_login_redirect', $redirect, $user );
+
 	wp_send_json_success( array( 'redirect' => esc_url_raw( $redirect ) ) );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 5. Profile phone field
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. USER PROFILE: Phone field
+// ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Render the phone number input on the user profile screen.
+ *
+ * Only shown when the SMS method is enabled.
+ *
+ * @param WP_User $user The user being edited.
+ * @return void
+ */
 function pmp2fa_phone_field( $user ) {
 	$s = pmp2fa_get_settings();
-	if ( ! in_array( $s['method'], array( 'sms', 'both' ), true ) ) return;
-	$phone = esc_attr( get_user_meta( $user->ID, 'pmp2fa_phone', true ) );
+	if ( ! in_array( $s['method'], array( 'sms', 'both' ), true ) ) {
+		return;
+	}
+	$phone = esc_attr( (string) get_user_meta( $user->ID, 'pmp2fa_phone', true ) );
 	?>
 	<h2><?php esc_html_e( 'Two-Factor Authentication', 'pmp-2fa-authentication' ); ?></h2>
-	<table class="form-table" role="presentation"><tr>
-		<th><label for="pmp2fa_phone"><?php esc_html_e( 'Phone (SMS OTP)', 'pmp-2fa-authentication' ); ?></label></th>
-		<td>
-			<input type="tel" name="pmp2fa_phone" id="pmp2fa_phone" value="<?php echo esc_attr( $phone ); ?>" class="regular-text" placeholder="+12223334444">
-			<p class="description"><?php esc_html_e( 'E.164 format, e.g. +12223334444', 'pmp-2fa-authentication' ); ?></p>
-		</td>
-	</tr></table>
+	<table class="form-table" role="presentation">
+		<tr>
+			<th><label for="pmp2fa_phone"><?php esc_html_e( 'Phone (SMS OTP)', 'pmp-2fa-authentication' ); ?></label></th>
+			<td>
+				<input
+					type="tel"
+					name="pmp2fa_phone"
+					id="pmp2fa_phone"
+					value="<?php echo esc_attr( $phone ); ?>"
+					class="regular-text"
+					placeholder="+12223334444"
+				>
+				<p class="description"><?php esc_html_e( 'E.164 format, e.g. +12223334444', 'pmp-2fa-authentication' ); ?></p>
+			</td>
+		</tr>
+	</table>
 	<?php
 }
 
+/**
+ * Save the phone number from the user profile form.
+ *
+ * @param int $user_id WordPress user ID.
+ * @return void
+ */
 function pmp2fa_save_phone( $user_id ) {
-	if ( ! current_user_can( 'edit_user', $user_id ) ) return;
-	if ( ! isset( $_POST['pmp2fa_phone'] ) ) return; // phpcs:ignore WordPress.Security.NonceVerification.Missing
-	if ( ! isset( $_POST['_wpnonce'] ) || ! wp_verify_nonce( sanitize_key( wp_unslash( $_POST['_wpnonce'] ) ), 'update-user_' . $user_id ) ) return;
+	if ( ! current_user_can( 'edit_user', $user_id ) ) {
+		return;
+	}
+	if ( ! isset( $_POST['pmp2fa_phone'] ) ) {
+		return;
+	}
+	if (
+		! isset( $_POST['_wpnonce'] ) ||
+		! wp_verify_nonce( sanitize_key( wp_unslash( $_POST['_wpnonce'] ) ), 'update-user_' . $user_id )
+	) {
+		return;
+	}
+
 	$phone = sanitize_text_field( wp_unslash( $_POST['pmp2fa_phone'] ) );
-	if ( $phone && ! pmp2fa_validate_phone( $phone ) ) return;
+
+	// Reject non-empty values that fail E.164 validation.
+	if ( $phone && ! pmp2fa_validate_phone( $phone ) ) {
+		return;
+	}
+
 	update_user_meta( $user_id, 'pmp2fa_phone', $phone );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 5b. Profile: Trusted devices section
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5b. USER PROFILE: Trusted devices
+// ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Render the trusted-devices section on the user profile screen.
+ *
+ * @param WP_User $user The user being viewed/edited.
+ * @return void
+ */
 function pmp2fa_profile_trusted_devices( $user ) {
-	// Only show for the user's own profile or if admin.
 	$current_user_id = get_current_user_id();
 	$is_own_profile  = ( $current_user_id === $user->ID );
 	$is_admin        = current_user_can( 'manage_options' );
-	if ( ! $is_own_profile && ! $is_admin ) return;
 
-	// Count active trusted devices.
+	if ( ! $is_own_profile && ! $is_admin ) {
+		return;
+	}
+
 	$devices = (array) get_user_meta( $user->ID, '_pmp2fa_trusted', true );
 	$active  = array();
 	foreach ( $devices as $d ) {
@@ -318,63 +442,70 @@ function pmp2fa_profile_trusted_devices( $user ) {
 	$nonce = wp_create_nonce( 'pmp2fa_revoke_own_' . $user->ID );
 	?>
 	<div id="pmp2fa-trusted-devices-section">
-	<h2><?php esc_html_e( 'Two-Factor Authentication — Trusted Devices', 'pmp-2fa-authentication' ); ?></h2>
-	<table class="form-table" role="presentation">
-	<tr>
-		<th><?php esc_html_e( 'Trusted Devices', 'pmp-2fa-authentication' ); ?></th>
-		<td>
-			<?php if ( empty( $active ) ) : ?>
-				<p><?php esc_html_e( 'No trusted devices.', 'pmp-2fa-authentication' ); ?></p>
-			<?php else : ?>
-				<p>
-					<?php
-					printf(
-						/* translators: %d: number of trusted devices */
-						esc_html( _n( 'You have %d trusted device.', 'You have %d trusted devices.', count( $active ), 'pmp-2fa-authentication' ) ),
-						count( $active )
-					);
-					?>
-				</p>
-				<button type="button" class="button pmp2fa-revoke-own"
-					data-userid="<?php echo esc_attr( $user->ID ); ?>"
-					data-nonce="<?php echo esc_attr( $nonce ); ?>"
-					data-ajaxurl="<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>">
-					<?php esc_html_e( 'Revoke All Trusted Devices', 'pmp-2fa-authentication' ); ?>
-				</button>
-				<span class="pmp2fa-revoke-own-result" style="margin-left:8px;font-size:13px;"></span>
-			<?php endif; ?>
-			<p class="description" style="margin-top:8px;">
-				<?php esc_html_e( 'Revoking trusted devices means you will need to verify via OTP on your next login from any device.', 'pmp-2fa-authentication' ); ?>
-			</p>
-		</td>
-	</tr>
-	</table>
+		<h2><?php esc_html_e( 'Two-Factor Authentication — Trusted Devices', 'pmp-2fa-authentication' ); ?></h2>
+		<table class="form-table" role="presentation">
+			<tr>
+				<th><?php esc_html_e( 'Trusted Devices', 'pmp-2fa-authentication' ); ?></th>
+				<td>
+					<?php if ( empty( $active ) ) : ?>
+						<p><?php esc_html_e( 'No trusted devices on record.', 'pmp-2fa-authentication' ); ?></p>
+					<?php else : ?>
+						<p>
+							<?php
+							printf(
+								/* translators: %d: number of trusted devices */
+								esc_html( _n( 'You have %d trusted device.', 'You have %d trusted devices.', count( $active ), 'pmp-2fa-authentication' ) ),
+								count( $active )
+							);
+							?>
+						</p>
+						<button
+							type="button"
+							class="button pmp2fa-revoke-own"
+							data-userid="<?php echo esc_attr( $user->ID ); ?>"
+							data-nonce="<?php echo esc_attr( $nonce ); ?>"
+							data-ajaxurl="<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>"
+						>
+							<?php esc_html_e( 'Revoke All Trusted Devices', 'pmp-2fa-authentication' ); ?>
+						</button>
+						<span class="pmp2fa-revoke-own-result" style="margin-left:8px;font-size:13px;"></span>
+					<?php endif; ?>
+					<p class="description" style="margin-top:8px;">
+						<?php esc_html_e( 'Revoking trusted devices means you will need to verify via OTP on your next login from any device.', 'pmp-2fa-authentication' ); ?>
+					</p>
+				</td>
+			</tr>
+		</table>
 	</div>
 	<script>
-	(function() {
+	( function () {
 		var btns = document.querySelectorAll( '.pmp2fa-revoke-own' );
-		btns.forEach( function( btn ) {
-			btn.addEventListener( 'click', function() {
-				if ( ! confirm( 'Revoke all trusted devices? You will need OTP verification on next login.' ) ) return;
-				var b = this;
-				var result = b.parentNode.querySelector( '.pmp2fa-revoke-own-result' );
-				b.disabled = true;
+		btns.forEach( function ( btn ) {
+			btn.addEventListener( 'click', function () {
+				if ( ! confirm( '<?php echo esc_js( __( 'Revoke all trusted devices? You will need OTP verification on next login.', 'pmp-2fa-authentication' ) ); ?>' ) ) {
+					return;
+				}
+				var result = btn.parentNode.querySelector( '.pmp2fa-revoke-own-result' );
+				btn.disabled = true;
 				var xhr = new XMLHttpRequest();
-				xhr.open( 'POST', b.getAttribute('data-ajaxurl'), true );
+				xhr.open( 'POST', btn.getAttribute( 'data-ajaxurl' ), true );
 				xhr.setRequestHeader( 'Content-Type', 'application/x-www-form-urlencoded' );
-				xhr.onload = function() {
+				xhr.onload = function () {
 					try {
 						var res = JSON.parse( xhr.responseText );
 						result.style.color = res.success ? 'green' : 'red';
 						result.textContent  = res.data.message;
-						if ( res.success ) b.style.display = 'none';
-						else b.disabled = false;
-					} catch(e) { result.textContent = 'Error.'; b.disabled = false; }
+						if ( res.success ) { btn.style.display = 'none'; }
+						else { btn.disabled = false; }
+					} catch ( e ) {
+						result.textContent = '<?php echo esc_js( __( 'An error occurred.', 'pmp-2fa-authentication' ) ); ?>';
+						btn.disabled = false;
+					}
 				};
 				xhr.send(
 					'action=pmp2fa_revoke_own_devices' +
-					'&nonce=' + encodeURIComponent( b.getAttribute('data-nonce') ) +
-					'&user_id=' + encodeURIComponent( b.getAttribute('data-userid') )
+					'&nonce='   + encodeURIComponent( btn.getAttribute( 'data-nonce' ) ) +
+					'&user_id=' + encodeURIComponent( btn.getAttribute( 'data-userid' ) )
 				);
 			} );
 		} );
@@ -383,48 +514,46 @@ function pmp2fa_profile_trusted_devices( $user ) {
 	<?php
 }
 
+/**
+ * AJAX handler: allow a user to revoke their own trusted devices.
+ *
+ * @return void
+ */
 function pmp2fa_ajax_revoke_own_devices() {
 	$user_id = isset( $_POST['user_id'] ) ? absint( $_POST['user_id'] ) : 0;
-	if ( ! $user_id ) wp_send_json_error( array( 'message' => 'Invalid request.' ) );
-
-	// Verify nonce scoped to this user.
-	if ( ! isset( $_POST['nonce'] ) || ! wp_verify_nonce( sanitize_key( wp_unslash( $_POST['nonce'] ) ), 'pmp2fa_revoke_own_' . $user_id ) ) {
-		wp_send_json_error( array( 'message' => 'Security check failed.' ) );
+	if ( ! $user_id ) {
+		wp_send_json_error( array( 'message' => __( 'Invalid request.', 'pmp-2fa-authentication' ) ) );
 	}
 
-	// User can only revoke their own; admins can revoke anyone.
+	if (
+		! isset( $_POST['nonce'] ) ||
+		! wp_verify_nonce( sanitize_key( wp_unslash( $_POST['nonce'] ) ), 'pmp2fa_revoke_own_' . $user_id )
+	) {
+		wp_send_json_error( array( 'message' => __( 'Security check failed.', 'pmp-2fa-authentication' ) ), 403 );
+	}
+
 	if ( get_current_user_id() !== $user_id && ! current_user_can( 'manage_options' ) ) {
-		wp_send_json_error( array( 'message' => 'Permission denied.' ) );
+		wp_send_json_error( array( 'message' => __( 'Permission denied.', 'pmp-2fa-authentication' ) ), 403 );
 	}
 
 	pmp2fa_revoke_trusted_devices( $user_id );
-	wp_send_json_success( array( 'message' => __( 'All trusted devices have been revoked. You will need OTP verification on next login.', 'pmp-2fa-authentication' ) ) );
+
+	wp_send_json_success(
+		array( 'message' => __( 'All trusted devices have been revoked. OTP verification is required on your next login.', 'pmp-2fa-authentication' ) )
+	);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 6. Logout cleanup
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. LOGOUT CLEANUP
+// ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Clean up OTP and pending-state data when a user logs out.
+ *
+ * @param int $user_id WordPress user ID.
+ * @return void
+ */
 function pmp2fa_on_logout( $user_id ) {
 	pmp2fa_delete_otp( $user_id );
 	pmp2fa_clear_pending();
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 7. Debug
-// ═══════════════════════════════════════════════════════════════════════════
-
-function pmp2fa_ajax_debug() {
-	$token   = isset( $_COOKIE['pmp2fa_token'] ) ? sanitize_text_field( wp_unslash( $_COOKIE['pmp2fa_token'] ) ) : '';
-	$user_id = $token ? (int) get_transient( 'pmp2fa_p_' . $token ) : 0;
-	$acc_id  = get_option( 'pmpro_account_page_id' );
-	wp_send_json( array(
-		'token_cookie'    => $token ? 'present' : 'MISSING',
-		'pending_user_id' => $user_id ?: 'NOT FOUND',
-		'otp_stored'      => $user_id ? ( false !== get_transient( 'pmp2fa_otp_' . $user_id ) ? 'yes' : 'no' ) : 'n/a',
-		'pmpro_acc_page'  => $acc_id ? get_permalink( $acc_id ) : 'not set',
-		'is_ssl'          => is_ssl() ? 'yes' : 'no',
-		'fresh_nonce'     => wp_create_nonce( 'pmp2fa_nonce' ),
-		'current_url'     => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-	) );
 }
