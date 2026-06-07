@@ -1,11 +1,13 @@
 /**
- * PMP 2FA Authentication – Modal overlay supplement.
- * Core modal styles live inline in templates/2fa-page-full.php so they
- * are always available even when this file is enqueued late. This file
- * is kept for any future theme-level overrides.
+ * PMP 2FA Authentication – Overlay supplement.
+ *
+ * Core modal styles are inlined in templates/2fa-page-full.php to guarantee
+ * they are always available even when this file is enqueued late. Use this
+ * file for theme-level overrides if needed.
  *
  * @package PMP_2FA_Authentication
+ * @since   2.0.0
  */
 
-/* Ensure the backdrop is always on top of third-party plugins. */
+/* Keep modal on top of any third-party plugins. */
 #pmp2fa-modal-backdrop { z-index: 999990 !important; }
